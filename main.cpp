@@ -4,6 +4,7 @@
 #include <map>
 #include <functional>
 #include <algorithm>
+#include <stdexcept>
 
 using namespace std;
 
@@ -18,9 +19,18 @@ private:
 public:
     Entity(string _nombre, int _vida) : nombre(_nombre), vida(_vida), energia(100) {}
 
-    void curar(int n) { vida += n; }
-    void danar(int n) { vida -= n; }
-    void usar_energia(int n) { energia -= n; }
+    void curar(int n) {
+        if (n < 0) throw invalid_argument("Valor negativo no permitido");
+        vida = min(100, vida + n);
+    }
+    void danar(int n) {
+        if (n < 0) throw invalid_argument("Valor negativo no permitido");
+        vida = max(0, vida - n);
+    }
+    void usar_energia(int n) {
+        if (n < 0) throw invalid_argument("Valor negativo no permitido");
+        energia = max(0, energia - n);
+    }
     void resetear() { vida = 100; energia = 100; }
 
     string get_status() const {
@@ -42,17 +52,28 @@ public:
         comandos[nombre] = cmd;
     }
 
-    void execute(string nombre, const list<string>& args) {
-        map<string, Command>::iterator it = comandos.find(nombre);
+    void removeCommand(string nombre) {
+        if (comandos.erase(nombre)) {
+            cout << "[SISTEMA] Comando '" << nombre << "' eliminado." << endl;
+        }
+    }
 
-        if (it != comandos.end()) {
-            string antes = entity.get_status();
+    void execute(string nombre, const list<string>& args) {
+        auto it = comandos.find(nombre);
+        if (it == comandos.end()) {
+            string error = "ERROR: Comando '" + nombre + "' inexistente.";
+            historial.push_back(error);
+            throw runtime_error(error);
+        }
+
+        string antes = entity.get_status();
+        try {
             it->second(args);
             string despues = entity.get_status();
-
-            historial.push_back("Comando: " + nombre + " | Antes: " + antes + " -> Despues: " + despues);
-        } else {
-            cout << "Error: El comando '" << nombre << "' no existe." << endl;
+            historial.push_back("Comando: " + nombre + " | " + antes + " -> " + despues);
+        } catch (const exception& e) {
+            historial.push_back("Fallo en '" + nombre + "': " + string(e.what()));
+            throw;
         }
     }
 
@@ -62,66 +83,84 @@ public:
 
     void executeMacro(const string& name) {
         auto it_macro = macros.find(name);
-        if (it_macro != macros.end()) {
-            list<pair<string, list<string>>>::iterator it_step;
-            for (it_step = it_macro->second.begin(); it_step != it_macro->second.end(); ++it_step) {
-                execute(it_step->first, it_step->second);
+        if (it_macro == macros.end()) {
+            cout << "Error: Macro '" << name << "' inexistente." << endl;
+            return;
+        }
+
+        cout << "\n> Ejecutando Macro: " << name << endl;
+        try {
+            for (auto& step : it_macro->second) {
+                execute(step.first, step.second);
             }
-        } else {
-            cout << "Error: La macro '" << name << "' no existe." << endl;
+        } catch (...) {
+            cout << "!! Macro interrumpida por error de validacion." << endl;
         }
     }
 
     void mostrar_historial() {
-        cout << "\n--- HISTORIAL DE COMANDOS ---" << endl;
-        for (list<string>::iterator it = historial.begin(); it != historial.end(); ++it)
+        cout << "\n--- HISTORIAL DE IMPACTO ---" << endl;
+        for (auto it = historial.begin(); it != historial.end(); ++it)
             cout << "* " << *it << endl;
     }
 };
 
-void cmd_status(Entity& e, const list<string>& args) {
-    cout << "[STATUS] Entidad actual: " << e.get_status() << endl;
+void f_curar(Entity& e, const list<string>& args) {
+    if (args.empty()) throw runtime_error("Sin argumentos");
+    e.curar(stoi(args.front()));
 }
+void f_status(Entity& e, const list<string>& args) { cout << "[INFO] " << e.get_status() << endl; }
+void f_reset(Entity& e, const list<string>& args) { e.resetear(); }
 
-class DamageCommand {
-private:
+struct DamageFunctor {
     Entity& entity;
-    int contador_usos;
-public:
-    DamageCommand(Entity& _e) : entity(_e), contador_usos(0) {}
     void operator()(const list<string>& args) {
-        if (args.empty()) return;
+        if (args.empty()) throw runtime_error("Sin valor de dano");
         entity.danar(stoi(args.front()));
-        contador_usos++;
-        cout << "(Dano total aplicado " << contador_usos << " veces)" << endl;
     }
+};
+struct EnergyFunctor {
+    Entity& entity;
+    void operator()(const list<string>& args) {
+        if (args.empty()) throw runtime_error("Sin valor de energia");
+        entity.usar_energia(stoi(args.front()));
+    }
+};
+struct SysLog {
+    void operator()(const list<string>& args) { cout << "[LOG] Operacion realizada." << endl; }
 };
 
 int main() {
-    Entity mi_entidad("Sebastian_UTEC", 100);
-    CommandCenter center(mi_entidad);
+    Entity sebastian("Sebastian_UTEC", 100);
+    CommandCenter center(sebastian);
 
-    center.registerCommand("heal", [&mi_entidad](const list<string>& args) {
-        if (!args.empty()) mi_entidad.curar(stoi(args.front()));
-    });
+    center.registerCommand("heal", bind(f_curar, ref(sebastian), placeholders::_1));
+    center.registerCommand("status", bind(f_status, ref(sebastian), placeholders::_1));
+    center.registerCommand("reset", bind(f_reset, ref(sebastian), placeholders::_1));
 
-    center.registerCommand("status", [&mi_entidad](const list<string>& args) {
-        cmd_status(mi_entidad, args);
-    });
+    center.registerCommand("damage", DamageFunctor{sebastian});
+    center.registerCommand("burn", EnergyFunctor{sebastian});
+    center.registerCommand("log", SysLog{});
 
-    center.registerCommand("damage", DamageCommand(mi_entidad));
+    center.registerCommand("full_hp", [&](const list<string>& a){ sebastian.curar(100); });
+    center.registerCommand("poison", [&](const list<string>& a){ sebastian.danar(10); });
+    center.registerCommand("msg", [&](const list<string>& a){ cout << "Sistema activo" << endl; });
 
-    center.registerCommand("reset", [&mi_entidad](const list<string>& args) {
-        mi_entidad.resetear();
-    });
+    cout << "--- PRUEBAS DE FUNCIONAMIENTO ---" << endl;
+    center.execute("damage", {"15"});
 
-    center.registerMacro("recovery", { {"heal", {"50"}}, {"status", {}} });
-    center.registerMacro("triple_damage", { {"damage", {"10"}}, {"damage", {"10"}}, {"damage", {"10"}} });
-    center.registerMacro("hard_reset", { {"reset", {}}, {"status", {}} });
+    try {
+        center.execute("invalid_cmd", {});
+    } catch(const exception& e) { cout << "Validacion: " << e.what() << endl; }
 
-    center.execute("damage", {"30"});
-    center.executeMacro("recovery");
-    center.executeMacro("triple_damage");
+    try {
+        center.execute("heal", {"-10"});
+    } catch(const exception& e) { cout << "Validacion: " << e.what() << endl; }
+
+    center.removeCommand("burn");
+
+    center.registerMacro("recovery_seq", { {"heal", {"20"}}, {"status", {}}, {"log", {}} });
+    center.executeMacro("recovery_seq");
 
     center.mostrar_historial();
 
